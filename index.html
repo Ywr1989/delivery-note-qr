@@ -4,6 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>送货单详情</title>
+<!--
+  丰康塑料厂 · 送货单扫码查看页
+  版本：v2.00
+  日期：2026-09-20
+  基线：v1.00（edge-qr/index_20260920_改造前备份.html）
+  改动：
+    Q1 移除页面内的明文密钥（旧版第 41-42 行）
+    Q2 改调 get_note → public_get_note（新码用 uid）/ legacy_get_note（旧码用单号）
+    Q3 页脚"成都市武侯区丰康塑料厂"保持不变（客户认知主体就是丰康）
+    Q5 源码中不残留任何凭证（本仓库为 public）
+    Q6 BOM 组成展示保留；BOM 随单据一并返回，且只含该单涉及的料号
+  部署：复制为 index.html 推送到 GitHub Pages
+-->
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:"Microsoft YaHei",sans-serif;padding:12px;max-width:600px;margin:0 auto;color:#333;line-height:1.7;font-size:14px}
@@ -38,86 +51,98 @@ td.l{text-align:left}
 <body>
 <div id="app"><div class="loading">加载中...</div></div>
 <script>
+/* v2.00：页面内不再保存任何密钥。云函数也不接受密钥，只认二维码里带的随机编号。 */
 var API = "https://1253791604-411y9uhfks.ap-chengdu.tencentscf.com";
-var SECRET = "3332476";
-var BOM_URL = API; // 通过云函数读取BOM（绕开CORS）
 var p = new URLSearchParams(location.search);
-var serial = p.get('s') || '';
-document.getElementById('app').innerHTML = '<div class="loading">加载 ' + serial + ' 中...</div>';
+var param = (p.get('s') || '').trim();
+
+document.getElementById('app').innerHTML = '<div class="loading">加载中...</div>';
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
-// 同时加载送货单和BOM
-Promise.all([
-  fetch(API, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'get_note',secret:SECRET,serial:serial})}).then(function(r){return r.json()}),
-  fetch(BOM_URL, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'get_bom',secret:SECRET})}).then(function(r){return r.json()}).then(function(r){return r.bom||{}}).catch(function(){return {}})
-]).then(function(results){
-  var res = results[0];
-  var bom = results[1];
-  if (!res.ok) throw new Error(res.error || '加载失败');
-  var note = res.note;
-  var items = note.items || [];
-
-  // 收集送货单中哪些料号有BOM
-  var bomParts = {};
-  (items||[]).forEach(function(it){
-    var pn = (it.part||'').trim();
-    if (pn && bom[pn]) bomParts[pn] = bom[pn];
-  });
-  var hasBom = Object.keys(bomParts).length > 0;
-
-  var header = '<div class="card">';
-  header += '<div class="row"><span class="lbl">收货单位：</span>' + esc(note.company||'') + '</div>';
-  if (note.contact || note.phone) header += '<div class="row"><span class="lbl">联系人：</span>' + esc((note.contact||'')+' '+(note.phone||'')) + '</div>';
-  if (note.date) header += '<div class="row"><span class="lbl">日期：</span>' + esc(note.date) + '</div>';
-  if (note.address) header += '<div class="row"><span class="lbl">地址：</span>' + esc(note.address) + '</div>';
-  if (note.creator) header += '<div class="row"><span class="lbl">制单：</span>' + esc(note.creator) + '</div>';
-  header += '</div>';
-
-  var rows = '';
-  for (var i = 0; i < items.length; i++) {
-    var it = items[i];
-    var pn = (it.part||'').trim();
-    var bomHtml = '';
-    if (pn && bomParts[pn]) {
-      var comps = bomParts[pn];
-      var bomId = 'bom-' + i;
-      bomHtml = ' <span class="bom-toggle" onclick="document.getElementById(\''+bomId+'\').classList.toggle(\'show\')">组成</span><div class="bom-detail" id="'+bomId+'">';
-      comps.forEach(function(c){
-        bomHtml += '<div class="bom-row"><span>子件：</span>' + esc(c.part) + ' ×' + (c.qty||1) + '</div><div class="bom-row" style="color:#059669;padding-left:32px">' + esc(c.cn||'') + '</div>';
-      });
-      bomHtml += '</div>';
-    }
-    rows += '<tr><td>' + (i+1) + '</td>' +
-      '<td class="l">' + esc(it.po||'') + '</td>' +
-      '<td class="l">' + esc(it.part||'') + bomHtml + '</td>' +
-      '<td class="l">' + esc(it.spec||'') + '</td>' +
-      '<td>' + esc(it.unit||'') + '</td>' +
-      '<td>' + esc(it.qty||'') + '</td>' +
-      '<td>' + esc(it.carton||'') + '</td>' +
-      '<td>' + esc(it.remark||'') + '</td></tr>';
+/* 判断二维码里带的是什么：
+   - 老的纸质码：8位日期-3位序号，例如 20260807-060
+   - 新的二维码：一串随机编号（32位） */
+function buildRequest(v){
+  if (/^\d{8}-\d{3}$/.test(v)) {
+    return { action:'legacy_get_note', serial: v };   // 旧码
   }
+  return { action:'public_get_note', uid: v };         // 新码
+}
 
-  var bomHint = hasBom ? '<div style="font-size:11px;color:#1a56a8;margin-top:4px;">点击品名品号后的「组成」查看装配料号</div>' : '';
-
+if (!param) {
   document.getElementById('app').innerHTML =
-    '<h2>送货单 ' + esc(note.serial||serial) + '</h2>' +
-    header +
-    (items.length ? '<div class="table-wrap"><table><thead><tr><th>#</th><th>客户订单号</th><th>品名品号</th><th>规格</th><th>单位</th><th>数量</th><th>箱数</th><th>备注</th></tr></thead><tbody>' + rows + '</tbody></table></div>' + bomHint + '<div class="scroll-hint">左右滑动查看完整表格（共 ' + items.length + ' 行）</div>' : '') +
-    '<div class="copy-wrap"><button class="copy-btn" onclick="doCopy()">复制数据</button>' +
-    '<div class="copy-hint">可粘贴到Excel，自动分列</div></div>' +
-    '<div class="footer">成都市武侯区丰康塑料厂 | 扫码查看</div>';
+    '<div class="error">二维码内容为空<small>请重新扫描送货单上的二维码</small></div>';
+} else {
+  fetch(API, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(buildRequest(param))
+  }).then(function(r){ return r.json() }).then(function(res){
+    if (!res.ok) throw new Error(res.error || '加载失败');
+    var note = res.note || {};
+    var bom  = res.bom || {};
+    var items = note.items || [];
 
-  window._copyData = {
-    serial: note.serial||serial, date: note.date||'', company: note.company||'',
-    contact: note.contact||'', phone: note.phone||'', address: note.address||'',
-    creator: note.creator||'', items: items
-  };
-}).catch(function(e){
-  document.getElementById('app').innerHTML =
-    '<div class="error">' + esc(e.message) +
-    '<small>单号：' + esc(serial) + '</small></div>';
-});
+    var bomParts = {};
+    (items||[]).forEach(function(it){
+      var pn = (it.part||'').trim();
+      if (pn && bom[pn]) bomParts[pn] = bom[pn];
+    });
+    var hasBom = Object.keys(bomParts).length > 0;
+
+    var header = '<div class="card">';
+    header += '<div class="row"><span class="lbl">收货单位：</span>' + esc(note.company||'') + '</div>';
+    if (note.contact || note.phone) header += '<div class="row"><span class="lbl">联系人：</span>' + esc((note.contact||'')+' '+(note.phone||'')) + '</div>';
+    if (note.date) header += '<div class="row"><span class="lbl">日期：</span>' + esc(note.date) + '</div>';
+    if (note.address) header += '<div class="row"><span class="lbl">地址：</span>' + esc(note.address) + '</div>';
+    header += '</div>';
+
+    var rows = '';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var pn = (it.part||'').trim();
+      var bomHtml = '';
+      if (pn && bomParts[pn]) {
+        var comps = bomParts[pn];
+        var bomId = 'bom-' + i;
+        bomHtml = ' <span class="bom-toggle" onclick="document.getElementById(\''+bomId+'\').classList.toggle(\'show\')">组成</span><div class="bom-detail" id="'+bomId+'">';
+        comps.forEach(function(c){
+          bomHtml += '<div class="bom-row"><span>子件：</span>' + esc(c.part) + ' ×' + (c.qty||1) + '</div><div class="bom-row" style="color:#059669;padding-left:32px">' + esc(c.cn||'') + '</div>';
+        });
+        bomHtml += '</div>';
+      }
+      rows += '<tr><td>' + (i+1) + '</td>' +
+        '<td class="l">' + esc(it.po||'') + '</td>' +
+        '<td class="l">' + esc(it.part||'') + bomHtml + '</td>' +
+        '<td class="l">' + esc(it.spec||'') + '</td>' +
+        '<td>' + esc(it.unit||'') + '</td>' +
+        '<td>' + esc(it.qty||'') + '</td>' +
+        '<td>' + esc(it.carton||'') + '</td>' +
+        '<td>' + esc(it.remark||'') + '</td></tr>';
+    }
+
+    var bomHint = hasBom ? '<div style="font-size:11px;color:#1a56a8;margin-top:4px;">点击品名品号后的「组成」查看装配料号</div>' : '';
+
+    document.getElementById('app').innerHTML =
+      '<h2>送货单 ' + esc(note.serial||param) + '</h2>' +
+      header +
+      (items.length ? '<div class="table-wrap"><table><thead><tr><th>#</th><th>客户订单号</th><th>品名品号</th><th>规格</th><th>单位</th><th>数量</th><th>箱数</th><th>备注</th></tr></thead><tbody>' + rows + '</tbody></table></div>' + bomHint + '<div class="scroll-hint">左右滑动查看完整表格（共 ' + items.length + ' 行）</div>' : '') +
+      '<div class="copy-wrap"><button class="copy-btn" onclick="doCopy()">复制数据</button>' +
+      '<div class="copy-hint">可粘贴到Excel，自动分列</div></div>' +
+      '<div class="footer">成都市武侯区丰康塑料厂 | 扫码查看</div>';
+
+    window._copyData = {
+      serial: note.serial||param, date: note.date||'', company: note.company||'',
+      contact: note.contact||'', phone: note.phone||'', address: note.address||'',
+      items: items
+    };
+  }).catch(function(e){
+    document.getElementById('app').innerHTML =
+      '<div class="error">' + esc(e.message) +
+      '<small>如反复失败，请联系发货方核对送货单</small></div>';
+  });
+}
 
 function doCopy() {
   var d = window._copyData;
@@ -128,20 +153,17 @@ function doCopy() {
   });
   var tsv = lines.join('\n');
   var btn = document.querySelector('.copy-btn');
-  var write = function(){
-    navigator.clipboard.writeText(tsv).then(function(){
-      btn.textContent = '已复制'; btn.classList.add('copy-ok');
-      setTimeout(function(){ btn.textContent = '复制数据'; btn.classList.remove('copy-ok'); }, 1500);
-    }).catch(function(){
-      var ta = document.createElement('textarea'); ta.value = tsv;
-      ta.style.position='fixed';ta.style.left='-9999px';
-      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
-      document.body.removeChild(ta);
-      btn.textContent = '已复制'; btn.classList.add('copy-ok');
-      setTimeout(function(){ btn.textContent = '复制数据'; btn.classList.remove('copy-ok'); }, 1500);
-    });
+  var done = function(){
+    btn.textContent = '已复制'; btn.classList.add('copy-ok');
+    setTimeout(function(){ btn.textContent = '复制数据'; btn.classList.remove('copy-ok'); }, 1500);
   };
-  write();
+  navigator.clipboard.writeText(tsv).then(done).catch(function(){
+    var ta = document.createElement('textarea'); ta.value = tsv;
+    ta.style.position='fixed';ta.style.left='-9999px';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta);
+    done();
+  });
 }
 </script>
 </body>
